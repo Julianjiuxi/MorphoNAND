@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import SimConfig
-from .rules import BinaryAttractionForce, ContactNAND, ForceRule, LogicRule, NearestTwoNAND, minimum_image
+from .rules import BinaryAttractionForce, ContactNAND, ForceRule, LogicRule, NearestTwoNAND, SignalNAND, minimum_image
 
 
 @dataclass(slots=True)
@@ -25,6 +25,7 @@ class World:
         force_rule: ForceRule | None = None,
         logic_rule: LogicRule | None = None,
         contact_rule: ContactNAND | None = None,
+        signal_rule: SignalNAND | None = None,
     ) -> None:
         self.cfg = config
         self.cfg.validate()
@@ -49,7 +50,18 @@ class World:
             min_neighbors=config.logic_min_neighbors,
             flip_probability=config.logic_flip_probability,
         )
+        self.signal_rule = signal_rule or SignalNAND(
+            bind_radius=config.bind_radius,
+            break_radius=config.break_radius,
+            min_neighbors=config.logic_min_neighbors,
+            gate_delay=config.gate_delay,
+            refractory=config.refractory,
+            flip_probability=config.logic_flip_probability,
+        )
         self.bonds = np.zeros((n, n), dtype=bool)
+        self.signal = np.zeros(n, dtype=bool)
+        self.ready_time = np.full(n, np.inf)
+        self.bond_age = np.zeros((n, n), dtype=float)
         self.step_index = 0
         self.last_logic_flips = 0
 
@@ -86,6 +98,21 @@ class World:
                         self.bits,
                         self.bonds,
                         self.cfg.box_size,
+                        self.rng,
+                    )
+                elif self.cfg.logic_mode == "signal":
+                    t = self.step_index * self.cfg.dt
+                    (self.bits, self.bonds, self.signal, self.ready_time,
+                     self.bond_age, self.last_logic_flips) = self.signal_rule.update(
+                        self.positions,
+                        self.bits,
+                        self.bonds,
+                        self.signal,
+                        self.ready_time,
+                        self.bond_age,
+                        self.cfg.box_size,
+                        t,
+                        self.cfg.dt,
                         self.rng,
                     )
                 elif self.step_index % self.cfg.logic_interval == 0:

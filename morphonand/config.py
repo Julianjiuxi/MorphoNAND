@@ -40,6 +40,15 @@ class SimConfig:
     bind_radius: float = 0.48
     break_radius: float = 0.65
 
+    # Signal-mode event timing
+    gate_delay: float = 0.175  # tau_gate: propagation delay after a bit change
+    refractory: float = 0.07   # tau_refractory: minimum gap between a particle's NANDs
+
+    # Die detection / auto-save
+    snapshot_interval: int = 500   # record a position snapshot every N steps
+    die_threshold: float = 0.05    # mean displacement below this marks the system as dead
+    die_dir: str = r"D:\桌面\MorphoNAND\die graph"
+
     # Visualization
     fps: int = 40
     trail_length: int = 0
@@ -60,10 +69,18 @@ class SimConfig:
             raise ValueError("logic_interval and logic_min_neighbors must be >= 1")
         if not 0 <= self.logic_flip_probability <= 1:
             raise ValueError("logic_flip_probability must be in [0, 1]")
-        if self.logic_mode not in ("periodic", "contact"):
-            raise ValueError("logic_mode must be 'periodic' or 'contact'")
+        if self.logic_mode not in ("periodic", "contact", "signal"):
+            raise ValueError("logic_mode must be 'periodic', 'contact' or 'signal'")
         if not 0 < self.bind_radius < self.break_radius:
             raise ValueError("Require 0 < bind_radius < break_radius")
+        if self.gate_delay <= 0:
+            raise ValueError("gate_delay must be positive")
+        if self.refractory < 0:
+            raise ValueError("refractory must be >= 0")
+        if self.snapshot_interval < 1:
+            raise ValueError("snapshot_interval must be >= 1")
+        if self.die_threshold < 0:
+            raise ValueError("die_threshold must be >= 0")
         if not 0 < self.damping <= 1:
             raise ValueError("damping must be in (0, 1]")
         if self.boundary != "periodic":

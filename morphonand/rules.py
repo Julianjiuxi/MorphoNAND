@@ -171,3 +171,97 @@ class ContactNAND:
                 flips += 1
 
         return new_bits, new_bonds, flips
+
+
+@dataclass(slots=True)
+class SignalNAND:
+    """
+    V0.2 signal-driven asynchronous NAND.
+
+    Topology decides WHO can talk to WHOM (the bond graph). Signals decide WHEN
+    computation happens. A particle computes only on local causal events:
+        - a bond is created
+        - a bond is broken
+        - a bonded neighbor's bit changed
+
+    A fired NAND that flips a bit propagates a signal to its bonded neighbors
+    after gate_delay, and each particle has a refractory period so a single
+    physical step cannot produce an unbounded cascade.
+
+    The two gate inputs are the two *oldest* active bonds, so wiring has
+    persistence instead of re-selecting the nearest neighbors on every event.
+    """
+
+    bind_radius: float = 0.48
+    break_radius: float = 0.65
+    min_neighbors: int = 2
+    gate_delay: float = 0.175
+    refractory: float = 0.07
+    flip_probability: float = 1.0
+
+    def update(
+        self,
+        positions: Array,
+        bits: Array,
+        bonds: Array,
+        signal: Array,
+        ready_time: Array,
+        bond_age: Array,
+        box_size: float,
+        time: float,
+        dt: float,
+        rng: np.random.Generator,
+    ) -> tuple[Array, Array, Array, Array, Array, int]:
+        disp = positions[None, :, :] - positions[:, None, :]
+        disp = minimum_image(disp, box_size)
+        distances = np.sqrt(np.einsum("ijk,ijk->ij", disp, disp))
+        np.fill_diagonal(distances, np.inf)
+
+        # 1. Update bonds with hysteresis, and age each surviving bond.
+        new_bond = (~bonds) & (distances < self.bind_radius)
+        broken = bonds & (distances > self.break_radius)
+        new_bonds = (bonds | new_bond) & ~broken
+        surviving = bonds & ~broken
+        bond_age = np.where(surviving, bond_age + dt, 0.0)
+
+        # 2. Bond events (created or broken) excite their two endpoints now.
+        signal = signal.copy()
+        ready_time = ready_time.copy()
+        changed = new_bond | broken
+        if changed.any():
+            ii, jj = np.nonzero(changed)
+            signal[ii] = True
+            signal[jj] = True
+            ready_time[ii] = np.minimum(ready_time[ii], time)
+            ready_time[jj] = np.minimum(ready_time[jj], time)
+
+        # 3. Process due events until none remain within this step.
+        new_bits = bits.copy()
+        flips = 0
+        while True:
+            due = signal & (ready_time <= time)
+            if not due.any():
+                break
+            order = np.flatnonzero(due)
+            rng.shuffle(order)  # asynchronous: later events see earlier outputs
+            for i in order:
+                if ready_time[i] > time:
+                    continue  # re-scheduled for the future by an earlier event
+                signal[i] = False
+                neighbors = np.flatnonzero(new_bonds[i])
+                if neighbors.size < self.min_neighbors:
+                    ready_time[i] = time + self.refractory
+                    continue
+                # Two oldest active bonds (wiring persistence).
+                by_age = np.argsort(-bond_age[i, neighbors])
+                a, b = neighbors[by_age[0]], neighbors[by_age[1]]
+                nand_value = 1 - int(bool(new_bits[a]) and bool(new_bits[b]))
+                if nand_value != new_bits[i] and rng.random() <= self.flip_probability:
+                    new_bits[i] = nand_value
+                    flips += 1
+                    for j in neighbors:
+                        signal[j] = True
+                        ready_time[j] = np.minimum(ready_time[j], time + self.gate_delay)
+                ready_time[i] = time + self.refractory
+
+        return new_bits, new_bonds, signal, ready_time, bond_age, flips
