@@ -57,14 +57,19 @@ class World:
             gate_delay=config.gate_delay,
             refractory=config.refractory,
             flip_probability=config.logic_flip_probability,
+            batch_events=config.batch_events,
+            allow_not=config.allow_not,
         )
         self.bonds = np.zeros((n, n), dtype=bool)
         self.signal = np.zeros(n, dtype=bool)
-        self.ready_time = np.full(n, np.inf)
+        self.ready_time = np.full(n, np.inf)  # event due time
+        self.refractory_until = np.zeros(n)
         self.bond_age = np.zeros((n, n), dtype=float)
         self.step_index = 0
         self.last_logic_flips = 0
         self.last_bond_events = 0
+        self.last_evals = 0
+        self.last_signals = 0
 
     def accelerations(self) -> np.ndarray:
         # disp[i,j] = vector from i to j, using minimum periodic image.
@@ -90,6 +95,8 @@ class World:
     def step(self, n: int = 1) -> StepStats:
         total_flips = 0
         total_bond_events = 0
+        total_evals = 0
+        total_signals = 0
         for _ in range(n):
             a = self.accelerations()
             self.velocities = (self.velocities + a * self.cfg.dt) * self.cfg.damping
@@ -103,6 +110,8 @@ class World:
             self.step_index += 1
             step_flips = 0
             step_bond_events = 0
+            step_evals = 0
+            step_signals = 0
 
             if self.cfg.logic_enabled:
                 if self.cfg.logic_mode == "contact":
@@ -119,13 +128,14 @@ class World:
                 elif self.cfg.logic_mode == "signal":
                     t = self.step_index * self.cfg.dt
                     old_bonds = self.bonds
-                    (new_bits, new_bonds, new_signal, new_ready_time,
-                     new_bond_age, flips) = self.signal_rule.update(
+                    (new_bits, new_bonds, new_signal, new_event_due,
+                     new_refractory_until, new_bond_age, sstats) = self.signal_rule.update(
                         self.positions,
                         self.bits,
                         self.bonds,
                         self.signal,
                         self.ready_time,
+                        self.refractory_until,
                         self.bond_age,
                         self.cfg.box_size,
                         t,
@@ -136,9 +146,12 @@ class World:
                     self.bits = new_bits
                     self.bonds = new_bonds
                     self.signal = new_signal
-                    self.ready_time = new_ready_time
+                    self.ready_time = new_event_due
+                    self.refractory_until = new_refractory_until
                     self.bond_age = new_bond_age
-                    step_flips = flips
+                    step_flips = sstats["flips"]
+                    step_evals = sstats["evals"]
+                    step_signals = sstats["signals"]
                 elif self.step_index % self.cfg.logic_interval == 0:
                     self.bits, step_flips = self.logic_rule.update(
                         self.positions,
@@ -152,9 +165,13 @@ class World:
 
             total_flips += step_flips
             total_bond_events += step_bond_events
+            total_evals += step_evals
+            total_signals += step_signals
 
         self.last_logic_flips = total_flips
         self.last_bond_events = total_bond_events
+        self.last_evals = total_evals
+        self.last_signals = total_signals
         return self.stats()
 
     def stats(self) -> StepStats:

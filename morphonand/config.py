@@ -44,6 +44,10 @@ class SimConfig:
     gate_delay: float = 0.175  # tau_gate: propagation delay after a bit change
     refractory: float = 0.07   # tau_refractory: minimum gap between a particle's NANDs
 
+    # v0.1.4: causal event scheduler + NAND-complete wiring
+    batch_events: bool = False  # same-timestamp events batch-evaluate against a frozen state, then commit
+    allow_not: bool = False     # degree=1 uses NAND(A,A)=NOT(A)
+
     # Reactive mechanical bond (v0.1.3): a bond also exerts a spring force.
     # bond_stiffness=0 disables the force, keeping v0.1.0..v0.1.2 behaviour.
     bond_stiffness: float = 0.0

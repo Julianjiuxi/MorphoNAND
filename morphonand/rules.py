@@ -184,12 +184,17 @@ class SignalNAND:
         - a bond is broken
         - a bonded neighbor's bit changed
 
-    A fired NAND that flips a bit propagates a signal to its bonded neighbors
-    after gate_delay, and each particle has a refractory period so a single
-    physical step cannot produce an unbounded cascade.
+    The two gate inputs are the two *oldest* active bonds (wiring persistence).
 
-    The two gate inputs are the two *oldest* active bonds, so wiring has
-    persistence instead of re-selecting the nearest neighbors on every event.
+    V0.1.4 (batch_events=True) separates the two timing roles that were
+    previously conflated in a single `ready_time`:
+        - event_due_time: when a pending signal actually arrives
+        - refractory_until: when the particle is allowed to fire again
+    A gate fires at max(event_due_time, refractory_until). Events that share the
+    same timestamp are evaluated against a frozen bit-state and committed
+    together, instead of being shuffled into a sequential order that can destroy
+    local oscillators. `allow_not=True` additionally lets a degree-1 particle
+    compute NAND(A,A)=NOT(A), restoring NAND's functional completeness.
     """
 
     bind_radius: float = 0.48
@@ -198,6 +203,8 @@ class SignalNAND:
     gate_delay: float = 0.175
     refractory: float = 0.07
     flip_probability: float = 1.0
+    batch_events: bool = False
+    allow_not: bool = False
 
     def update(
         self,
@@ -205,13 +212,14 @@ class SignalNAND:
         bits: Array,
         bonds: Array,
         signal: Array,
-        ready_time: Array,
+        event_due_time: Array,
+        refractory_until: Array,
         bond_age: Array,
         box_size: float,
         time: float,
         dt: float,
         rng: np.random.Generator,
-    ) -> tuple[Array, Array, Array, Array, Array, int]:
+    ) -> tuple[Array, Array, Array, Array, Array, Array, dict]:
         disp = positions[None, :, :] - positions[:, None, :]
         disp = minimum_image(disp, box_size)
         distances = np.sqrt(np.einsum("ijk,ijk->ij", disp, disp))
@@ -226,42 +234,92 @@ class SignalNAND:
 
         # 2. Bond events (created or broken) excite their two endpoints now.
         signal = signal.copy()
-        ready_time = ready_time.copy()
+        event_due_time = event_due_time.copy()
+        refractory_until = refractory_until.copy()
         changed = new_bond | broken
         if changed.any():
             ii, jj = np.nonzero(changed)
             signal[ii] = True
             signal[jj] = True
-            ready_time[ii] = np.minimum(ready_time[ii], time)
-            ready_time[jj] = np.minimum(ready_time[jj], time)
+            event_due_time[ii] = np.minimum(event_due_time[ii], time)
+            event_due_time[jj] = np.minimum(event_due_time[jj], time)
 
-        # 3. Process due events until none remain within this step.
         new_bits = bits.copy()
+        evals = 0
         flips = 0
-        while True:
-            due = signal & (ready_time <= time)
-            if not due.any():
-                break
-            order = np.flatnonzero(due)
-            rng.shuffle(order)  # asynchronous: later events see earlier outputs
-            for i in order:
-                if ready_time[i] > time:
-                    continue  # re-scheduled for the future by an earlier event
-                signal[i] = False
-                neighbors = np.flatnonzero(new_bonds[i])
-                if neighbors.size < self.min_neighbors:
-                    ready_time[i] = time + self.refractory
+        signals = 0
+
+        def eval_gate(i: int, state_bits: Array):
+            """Return (nand_value, neighbor_ids) for gate i, or None if no inputs."""
+            neighbors = np.flatnonzero(new_bonds[i])
+            if neighbors.size == 0:
+                return None
+            if neighbors.size == 1:
+                if not self.allow_not:
+                    return None
+                a = neighbors[0]
+                return 1 - int(bool(state_bits[a]) and bool(state_bits[a])), neighbors
+            by_age = np.argsort(-bond_age[i, neighbors])
+            a, b = neighbors[by_age[0]], neighbors[by_age[1]]
+            return 1 - int(bool(state_bits[a]) and bool(state_bits[b])), neighbors
+
+        def propagate(i: int, neighbors: Array) -> None:
+            nonlocal signals
+            for j in neighbors:
+                signal[j] = True
+                event_due_time[j] = np.minimum(event_due_time[j], time + self.gate_delay)
+                signals += 1
+
+        if self.batch_events:
+            # v0.1.4: batch evaluate against the frozen state, then commit all flips.
+            due = signal & (event_due_time <= time) & (refractory_until <= time)
+            due_idx = np.flatnonzero(due)
+            pending: dict[int, tuple[int, Array]] = {}
+            for i in due_idx:
+                result = eval_gate(i, new_bits)
+                if result is None:
+                    signal[i] = False
+                    refractory_until[i] = time + self.refractory
                     continue
-                # Two oldest active bonds (wiring persistence).
-                by_age = np.argsort(-bond_age[i, neighbors])
-                a, b = neighbors[by_age[0]], neighbors[by_age[1]]
-                nand_value = 1 - int(bool(new_bits[a]) and bool(new_bits[b]))
+                nand_value, neighbors = result
+                evals += 1
+                pending[i] = (nand_value, neighbors)
+            for i, (nand_value, neighbors) in pending.items():
                 if nand_value != new_bits[i] and rng.random() <= self.flip_probability:
                     new_bits[i] = nand_value
                     flips += 1
-                    for j in neighbors:
-                        signal[j] = True
-                        ready_time[j] = np.minimum(ready_time[j], time + self.gate_delay)
-                ready_time[i] = time + self.refractory
+                    propagate(i, neighbors)
+                refractory_until[i] = time + self.refractory
+                signal[i] = False
+        else:
+            # Legacy v0.1.2/v0.1.3: shuffled sequential update within this step.
+            while True:
+                due = signal & (event_due_time <= time) & (refractory_until <= time)
+                if not due.any():
+                    break
+                order = np.flatnonzero(due)
+                rng.shuffle(order)
+                for i in order:
+                    if event_due_time[i] > time or refractory_until[i] > time:
+                        continue
+                    signal[i] = False
+                    result = eval_gate(i, new_bits)
+                    if result is None:
+                        refractory_until[i] = time + self.refractory
+                        continue
+                    nand_value, neighbors = result
+                    evals += 1
+                    if nand_value != new_bits[i] and rng.random() <= self.flip_probability:
+                        new_bits[i] = nand_value
+                        flips += 1
+                        propagate(i, neighbors)
+                    refractory_until[i] = time + self.refractory
 
-        return new_bits, new_bonds, signal, ready_time, bond_age, flips
+        stats = {
+            "evals": evals,
+            "flips": flips,
+            "signals": signals,
+            "bond_created": int(new_bond.sum()),
+            "bond_broken": int(broken.sum()),
+        }
+        return new_bits, new_bonds, signal, event_due_time, refractory_until, bond_age, stats
