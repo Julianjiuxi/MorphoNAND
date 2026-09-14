@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, fields
+import json
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(slots=True)
+class SimConfig:
+    # World
+    n_particles: int = 180
+    box_size: float = 28.0
+    dt: float = 0.035
+    seed: int = 7
+    boundary: str = "periodic"
+
+    # Initial state
+    initial_one_fraction: float = 0.50
+    initial_speed: float = 0.05
+
+    # Mechanics
+    interaction_radius: float = 2.5
+    core_radius: float = 0.38
+    attraction_strength: float = 1.25
+    same_bit_repulsion: float = 0.80
+    core_repulsion: float = 6.0
+    damping: float = 0.992
+    max_speed: float = 4.0
+
+    # Logic / event layer
+    logic_enabled: bool = True
+    logic_radius: float = 1.25
+    logic_interval: int = 12
+    logic_min_neighbors: int = 2
+    logic_flip_probability: float = 1.0
+
+    # Visualization
+    fps: int = 40
+    trail_length: int = 0
+    marker_size: float = 22.0
+
+    def validate(self) -> None:
+        if self.n_particles < 3:
+            raise ValueError("n_particles must be >= 3")
+        if self.box_size <= 0 or self.dt <= 0:
+            raise ValueError("box_size and dt must be positive")
+        if not 0 <= self.initial_one_fraction <= 1:
+            raise ValueError("initial_one_fraction must be in [0, 1]")
+        if not 0 < self.core_radius < self.interaction_radius:
+            raise ValueError("Require 0 < core_radius < interaction_radius")
+        if not 0 < self.logic_radius <= self.interaction_radius:
+            raise ValueError("logic_radius must lie inside interaction_radius")
+        if self.logic_interval < 1 or self.logic_min_neighbors < 1:
+            raise ValueError("logic_interval and logic_min_neighbors must be >= 1")
+        if not 0 <= self.logic_flip_probability <= 1:
+            raise ValueError("logic_flip_probability must be in [0, 1]")
+        if not 0 < self.damping <= 1:
+            raise ValueError("damping must be in (0, 1]")
+        if self.boundary != "periodic":
+            raise ValueError("v0 currently supports boundary='periodic' only")
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "SimConfig":
+        raw: dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
+        allowed = {f.name for f in fields(cls)}
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(f"Unknown config keys: {sorted(unknown)}")
+        cfg = cls(**raw)
+        cfg.validate()
+        return cfg
+
+    def to_json(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
