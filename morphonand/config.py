@@ -44,10 +44,18 @@ class SimConfig:
     gate_delay: float = 0.175  # tau_gate: propagation delay after a bit change
     refractory: float = 0.07   # tau_refractory: minimum gap between a particle's NANDs
 
+    # Reactive mechanical bond (v0.1.3): a bond also exerts a spring force.
+    # bond_stiffness=0 disables the force, keeping v0.1.0..v0.1.2 behaviour.
+    bond_stiffness: float = 0.0
+    bond_rest_length: float = 0.40
+    bond_max_force: float = 2.0
+
     # Die detection / auto-save
-    snapshot_interval: int = 500   # record a position snapshot every N steps
-    die_threshold: float = 0.05    # mean displacement below this marks the system as dead
+    die_window: int = 500            # steps per detection window
+    die_consecutive: int = 3         # consecutive dead windows required to stop
+    die_speed_threshold: float = 0.005  # mean speed below this marks mechanical quiescence
     die_dir: str = r"D:\桌面\MorphoNAND\die graph"
+    snapshot_interval: int = 500     # record a position snapshot every N steps into the .npy
 
     # Visualization
     fps: int = 40
@@ -77,10 +85,14 @@ class SimConfig:
             raise ValueError("gate_delay must be positive")
         if self.refractory < 0:
             raise ValueError("refractory must be >= 0")
+        if self.bond_stiffness < 0 or self.bond_rest_length < 0 or self.bond_max_force < 0:
+            raise ValueError("bond_stiffness, bond_rest_length and bond_max_force must be >= 0")
+        if self.die_window < 1 or self.die_consecutive < 1:
+            raise ValueError("die_window and die_consecutive must be >= 1")
+        if self.die_speed_threshold < 0:
+            raise ValueError("die_speed_threshold must be >= 0")
         if self.snapshot_interval < 1:
             raise ValueError("snapshot_interval must be >= 1")
-        if self.die_threshold < 0:
-            raise ValueError("die_threshold must be >= 0")
         if not 0 < self.damping <= 1:
             raise ValueError("damping must be in (0, 1]")
         if self.boundary != "periodic":

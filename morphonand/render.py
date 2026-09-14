@@ -6,7 +6,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-from .rules import minimum_image
 from .world import World
 
 
@@ -20,6 +19,8 @@ VERSION_BY_MODE = {
 
 
 def version_label(world: World) -> str:
+    if world.cfg.bond_stiffness > 0.0:
+        return "v0.1.3"
     return VERSION_BY_MODE.get(world.cfg.logic_mode, "v0.1.0")
 
 
@@ -61,32 +62,64 @@ def show(world: World, steps_per_frame: int = 1) -> None:
 
     paused = {"value": False}
 
-    # Die detection state: compare position snapshots every snapshot_interval steps.
-    snapshot_interval = world.cfg.snapshot_interval
-    die_threshold = world.cfg.die_threshold
+    die_window = world.cfg.die_window
+    die_consecutive = world.cfg.die_consecutive
+    die_speed_threshold = world.cfg.die_speed_threshold
     die_dir = Path(world.cfg.die_dir)
-    last_snapshot = world.positions.copy()
-    next_snapshot_at = world.step_index + snapshot_interval
+    snapshot_interval = world.cfg.snapshot_interval
+
+    window_flips = 0
+    window_bond_events = 0
+    window_start_step = world.step_index
+    consecutive_dead = 0
+
+    snapshots: list[np.ndarray] = []
+    snapshot_steps: list[int] = []
+    snapshot_times: list[float] = []
+
+    def reset_world() -> None:
+        nonlocal window_flips, window_bond_events, window_start_step, consecutive_dead
+        nonlocal snapshots, snapshot_steps, snapshot_times
+        fresh = World(world.cfg, world.force_rule, world.logic_rule, world.contact_rule, world.signal_rule)
+        world.positions[:] = fresh.positions
+        world.velocities[:] = fresh.velocities
+        world.bits[:] = fresh.bits
+        world.bonds[:] = fresh.bonds
+        world.signal[:] = fresh.signal
+        world.ready_time[:] = fresh.ready_time
+        world.bond_age[:] = fresh.bond_age
+        world.step_index = 0
+        world.last_logic_flips = 0
+        world.last_bond_events = 0
+        window_flips = 0
+        window_bond_events = 0
+        window_start_step = 0
+        consecutive_dead = 0
+        snapshots = []
+        snapshot_steps = []
+        snapshot_times = []
 
     def on_key(event):
         if event.key == " ":
             paused["value"] = not paused["value"]
         elif event.key in ("r", "R"):
-            # Keep the same rule/config, but reset the random world with the same seed.
-            fresh = World(world.cfg, world.force_rule, world.logic_rule)
-            world.positions[:] = fresh.positions
-            world.velocities[:] = fresh.velocities
-            world.bits[:] = fresh.bits
-            world.step_index = 0
+            reset_world()
 
     fig.canvas.mpl_connect("key_press_event", on_key)
 
     def update(_frame):
-        nonlocal last_snapshot, next_snapshot_at
+        nonlocal window_flips, window_bond_events, window_start_step, consecutive_dead
         if not paused["value"]:
             stats = world.step(steps_per_frame)
+            window_flips += stats.logic_flips
+            window_bond_events += world.last_bond_events
+            if world.step_index % snapshot_interval == 0:
+                snapshots.append(world.positions.copy())
+                snapshot_steps.append(world.step_index)
+                snapshot_times.append(stats.time)
         else:
             stats = world.stats()
+
         scatter.set_offsets(world.positions)
         scatter.set_color(BIT_COLORS[world.bits])
         status.set_text(
@@ -100,17 +133,24 @@ def show(world: World, steps_per_frame: int = 1) -> None:
             trail_artist.set_offsets(pts)
             trail_artist.set_color(np.tile(BIT_COLORS[world.bits], len(trails)))
 
-        if not paused["value"] and world.step_index >= next_snapshot_at:
-            disp = minimum_image(world.positions - last_snapshot, world.cfg.box_size)
-            mean_change = float(np.linalg.norm(disp, axis=1).mean())
-            if mean_change < die_threshold:
-                die_dir.mkdir(parents=True, exist_ok=True)
-                fig.savefig(die_dir / f"{version}.png", dpi=160, bbox_inches="tight")
+        # Once per window, evaluate all death criteria together.
+        if not paused["value"] and world.step_index - window_start_step >= die_window:
+            pending = int(world.signal.sum())
+            dead = (
+                stats.mean_speed < die_speed_threshold
+                and window_flips == 0
+                and window_bond_events == 0
+                and pending == 0
+            )
+            consecutive_dead = consecutive_dead + 1 if dead else 0
+            window_flips = 0
+            window_bond_events = 0
+            window_start_step = world.step_index
+            if consecutive_dead >= die_consecutive:
+                _save_death(world, version, die_dir, fig, snapshots, snapshot_steps, snapshot_times)
                 animation.event_source.stop()
                 plt.close(fig)
                 return scatter, status
-            last_snapshot = world.positions.copy()
-            next_snapshot_at = world.step_index + snapshot_interval
 
         return scatter, status
 
@@ -119,6 +159,30 @@ def show(world: World, steps_per_frame: int = 1) -> None:
     # Keep a live reference for backends that otherwise garbage-collect animations.
     fig._morphonand_animation = animation  # type: ignore[attr-defined]
     plt.show()
+
+
+def _save_death(
+    world: World,
+    version: str,
+    die_dir: Path,
+    fig,
+    snapshots: list[np.ndarray],
+    snapshot_steps: list[int],
+    snapshot_times: list[float],
+) -> Path:
+    die_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(die_dir / f"{version}.png", dpi=160, bbox_inches="tight")
+
+    n = world.positions.shape[0]
+    record = {
+        "final_xy_bit": np.column_stack([world.positions, world.bits]),
+        "snapshots": np.asarray(snapshots) if snapshots else np.empty((0, n, 2)),
+        "snapshot_steps": np.asarray(snapshot_steps, dtype=int),
+        "snapshot_times": np.asarray(snapshot_times, dtype=float),
+    }
+    path = die_dir / f"{version}.npy"
+    np.save(path, record, allow_pickle=True)
+    return path
 
 
 def save_snapshot(world: World, path: str | Path, warmup_steps: int = 800) -> Path:

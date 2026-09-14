@@ -64,6 +64,7 @@ class World:
         self.bond_age = np.zeros((n, n), dtype=float)
         self.step_index = 0
         self.last_logic_flips = 0
+        self.last_bond_events = 0
 
     def accelerations(self) -> np.ndarray:
         # disp[i,j] = vector from i to j, using minimum periodic image.
@@ -75,9 +76,20 @@ class World:
         unit = disp / safe[:, :, None]
 
         scalar = self.force_rule.pair_scalar(self.bits, distances)
-        return np.einsum("ij,ijk->ik", scalar, unit)
+        accel = np.einsum("ij,ijk->ik", scalar, unit)
+
+        # Reactive mechanical bond: a formed bond is a finite spring.
+        if self.cfg.bond_stiffness > 0.0:
+            bond_scalar = self.cfg.bond_stiffness * (distances - self.cfg.bond_rest_length)
+            bond_scalar = np.clip(bond_scalar, -self.cfg.bond_max_force, self.cfg.bond_max_force)
+            bond_scalar = np.where(self.bonds, bond_scalar, 0.0)
+            accel = accel + np.einsum("ij,ijk->ik", bond_scalar, unit)
+
+        return accel
 
     def step(self, n: int = 1) -> StepStats:
+        total_flips = 0
+        total_bond_events = 0
         for _ in range(n):
             a = self.accelerations()
             self.velocities = (self.velocities + a * self.cfg.dt) * self.cfg.damping
@@ -89,21 +101,26 @@ class World:
 
             self.positions = (self.positions + self.velocities * self.cfg.dt) % self.cfg.box_size
             self.step_index += 1
-            self.last_logic_flips = 0
+            step_flips = 0
+            step_bond_events = 0
 
             if self.cfg.logic_enabled:
                 if self.cfg.logic_mode == "contact":
-                    self.bits, self.bonds, self.last_logic_flips = self.contact_rule.update(
+                    old_bonds = self.bonds
+                    new_bits, new_bonds, flips = self.contact_rule.update(
                         self.positions,
                         self.bits,
                         self.bonds,
                         self.cfg.box_size,
                         self.rng,
                     )
+                    step_bond_events = int(np.count_nonzero(new_bonds != old_bonds))
+                    self.bits, self.bonds, step_flips = new_bits, new_bonds, flips
                 elif self.cfg.logic_mode == "signal":
                     t = self.step_index * self.cfg.dt
-                    (self.bits, self.bonds, self.signal, self.ready_time,
-                     self.bond_age, self.last_logic_flips) = self.signal_rule.update(
+                    old_bonds = self.bonds
+                    (new_bits, new_bonds, new_signal, new_ready_time,
+                     new_bond_age, flips) = self.signal_rule.update(
                         self.positions,
                         self.bits,
                         self.bonds,
@@ -115,8 +132,15 @@ class World:
                         self.cfg.dt,
                         self.rng,
                     )
+                    step_bond_events = int(np.count_nonzero(new_bonds != old_bonds))
+                    self.bits = new_bits
+                    self.bonds = new_bonds
+                    self.signal = new_signal
+                    self.ready_time = new_ready_time
+                    self.bond_age = new_bond_age
+                    step_flips = flips
                 elif self.step_index % self.cfg.logic_interval == 0:
-                    self.bits, self.last_logic_flips = self.logic_rule.update(
+                    self.bits, step_flips = self.logic_rule.update(
                         self.positions,
                         self.bits,
                         self.cfg.box_size,
@@ -126,6 +150,11 @@ class World:
                         self.cfg.logic_flip_probability,
                     )
 
+            total_flips += step_flips
+            total_bond_events += step_bond_events
+
+        self.last_logic_flips = total_flips
+        self.last_bond_events = total_bond_events
         return self.stats()
 
     def stats(self) -> StepStats:
