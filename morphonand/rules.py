@@ -107,3 +107,67 @@ class NearestTwoNAND:
 
         flips = int(np.count_nonzero(new_bits != bits))
         return new_bits, flips
+
+
+@dataclass(slots=True)
+class ContactNAND:
+    """
+    V0.1 bond-triggered NAND event.
+
+    NAND no longer runs on a global clock. It fires only when local topology
+    changes: a particle's bonded degree crosses from below min_neighbors to at
+    least min_neighbors. The inputs are the particle's nearest *bonded*
+    neighbors, never arbitrary passers-by inside a scan radius.
+
+    Bonds are geometric and hysteretic:
+        - form when distance < bind_radius
+        - break when distance > break_radius (break_radius > bind_radius)
+    This gives the network structural memory without per-particle storage.
+
+    Events within one step are processed in shuffled order, so later events see
+    earlier outputs (asynchronous local semantics, not a universe-wide tick).
+    """
+
+    bind_radius: float = 0.48
+    break_radius: float = 0.65
+    min_neighbors: int = 2
+    flip_probability: float = 1.0
+
+    def update(
+        self,
+        positions: Array,
+        bits: Array,
+        bonds: Array,
+        box_size: float,
+        rng: np.random.Generator,
+    ) -> tuple[Array, Array, int]:
+        disp = positions[None, :, :] - positions[:, None, :]
+        disp = minimum_image(disp, box_size)
+        distances = np.sqrt(np.einsum("ijk,ijk->ij", disp, disp))
+        np.fill_diagonal(distances, np.inf)
+
+        degree_before = bonds.sum(axis=1)
+        new_bond = (~bonds) & (distances < self.bind_radius)
+        broken = bonds & (distances > self.break_radius)
+        new_bonds = (bonds | new_bond) & ~broken
+        degree_after = new_bonds.sum(axis=1)
+
+        # Fire only on the "second bond formed" topology change.
+        trigger = (degree_before < self.min_neighbors) & (degree_after >= self.min_neighbors)
+
+        new_bits = bits.copy()
+        flips = 0
+        order = np.flatnonzero(trigger)
+        rng.shuffle(order)  # asynchronous: later events see earlier outputs
+        for i in order:
+            neighbors = np.flatnonzero(new_bonds[i])
+            if neighbors.size < self.min_neighbors:
+                continue
+            two = np.argsort(distances[i, neighbors])[: self.min_neighbors]
+            a, b = neighbors[two]
+            nand_value = 1 - int(bool(new_bits[a]) and bool(new_bits[b]))
+            if nand_value != new_bits[i] and rng.random() <= self.flip_probability:
+                new_bits[i] = nand_value
+                flips += 1
+
+        return new_bits, new_bonds, flips

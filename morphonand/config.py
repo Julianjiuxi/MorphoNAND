@@ -30,10 +30,15 @@ class SimConfig:
 
     # Logic / event layer
     logic_enabled: bool = True
+    logic_mode: str = "periodic"  # "periodic": clock-tick scan; "contact": bond-triggered
     logic_radius: float = 1.25
     logic_interval: int = 12
     logic_min_neighbors: int = 2
     logic_flip_probability: float = 1.0
+
+    # Contact-mode bond physics (hysteresis: bind_radius < break_radius)
+    bind_radius: float = 0.48
+    break_radius: float = 0.65
 
     # Visualization
     fps: int = 40
@@ -55,6 +60,10 @@ class SimConfig:
             raise ValueError("logic_interval and logic_min_neighbors must be >= 1")
         if not 0 <= self.logic_flip_probability <= 1:
             raise ValueError("logic_flip_probability must be in [0, 1]")
+        if self.logic_mode not in ("periodic", "contact"):
+            raise ValueError("logic_mode must be 'periodic' or 'contact'")
+        if not 0 < self.bind_radius < self.break_radius:
+            raise ValueError("Require 0 < bind_radius < break_radius")
         if not 0 < self.damping <= 1:
             raise ValueError("damping must be in (0, 1]")
         if self.boundary != "periodic":

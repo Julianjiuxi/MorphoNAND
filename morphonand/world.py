@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import SimConfig
-from .rules import BinaryAttractionForce, ForceRule, LogicRule, NearestTwoNAND, minimum_image
+from .rules import BinaryAttractionForce, ContactNAND, ForceRule, LogicRule, NearestTwoNAND, minimum_image
 
 
 @dataclass(slots=True)
@@ -24,6 +24,7 @@ class World:
         config: SimConfig,
         force_rule: ForceRule | None = None,
         logic_rule: LogicRule | None = None,
+        contact_rule: ContactNAND | None = None,
     ) -> None:
         self.cfg = config
         self.cfg.validate()
@@ -42,6 +43,13 @@ class World:
             core_repulsion=config.core_repulsion,
         )
         self.logic_rule = logic_rule or NearestTwoNAND()
+        self.contact_rule = contact_rule or ContactNAND(
+            bind_radius=config.bind_radius,
+            break_radius=config.break_radius,
+            min_neighbors=config.logic_min_neighbors,
+            flip_probability=config.logic_flip_probability,
+        )
+        self.bonds = np.zeros((n, n), dtype=bool)
         self.step_index = 0
         self.last_logic_flips = 0
 
@@ -71,16 +79,25 @@ class World:
             self.step_index += 1
             self.last_logic_flips = 0
 
-            if self.cfg.logic_enabled and self.step_index % self.cfg.logic_interval == 0:
-                self.bits, self.last_logic_flips = self.logic_rule.update(
-                    self.positions,
-                    self.bits,
-                    self.cfg.box_size,
-                    self.cfg.logic_radius,
-                    self.cfg.logic_min_neighbors,
-                    self.rng,
-                    self.cfg.logic_flip_probability,
-                )
+            if self.cfg.logic_enabled:
+                if self.cfg.logic_mode == "contact":
+                    self.bits, self.bonds, self.last_logic_flips = self.contact_rule.update(
+                        self.positions,
+                        self.bits,
+                        self.bonds,
+                        self.cfg.box_size,
+                        self.rng,
+                    )
+                elif self.step_index % self.cfg.logic_interval == 0:
+                    self.bits, self.last_logic_flips = self.logic_rule.update(
+                        self.positions,
+                        self.bits,
+                        self.cfg.box_size,
+                        self.cfg.logic_radius,
+                        self.cfg.logic_min_neighbors,
+                        self.rng,
+                        self.cfg.logic_flip_probability,
+                    )
 
         return self.stats()
 
