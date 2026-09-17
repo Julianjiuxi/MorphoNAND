@@ -5,7 +5,7 @@
   "seed": 7,
   "boundary": "periodic",
   "initial_one_fraction": 0.5,
-  "initial_speed": 0.05,
+  "initial_speed": 0.5,
   "interaction_radius": 2.5,
   "core_radius": 0.38,
   "attraction_strength": 1.25,
